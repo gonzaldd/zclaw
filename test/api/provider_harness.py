@@ -251,6 +251,14 @@ PROVIDERS = {
         api_key_env="OPENROUTER_API_KEY",
         wire_format="openai",
     ),
+    "gemini": ProviderConfig(
+        name="gemini",
+        api_url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        default_model="gemini-2.5-flash",
+        model_env="GEMINI_MODEL",
+        api_key_env="GEMINI_API_KEY",
+        wire_format="openai",
+    ),
 }
 
 
