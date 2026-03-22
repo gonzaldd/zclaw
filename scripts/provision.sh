@@ -3,6 +3,8 @@
 
 set -e
 
+trap 'echo -e "\nAborted by user."; exit 1' INT
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PORT=""
@@ -29,9 +31,9 @@ Options:
   --port <serial-port>      Serial port (auto-detect if omitted)
   --ssid <wifi-ssid>        WiFi SSID (auto-detected when possible)
   --pass <wifi-pass>        WiFi password (optional)
-  --backend <provider>      anthropic | openai | openrouter | ollama
+  --backend <provider>      anthropic | openai | openrouter | ollama | gemini
   --model <model-id>        Model ID (defaults by backend)
-  --api-key <key>           LLM API key (required for anthropic/openai/openrouter)
+  --api-key <key>           LLM API key (required for anthropic/openai/openrouter/gemini)
   --api-url <url>           Optional custom API endpoint URL
   --tg-token <token>        Telegram bot token (optional)
   --tg-chat-id <id[,id...]> Telegram chat ID allowlist (optional)
@@ -352,6 +354,7 @@ default_model_for_backend() {
         openai) echo "gpt-5.4" ;;
         openrouter) echo "openrouter/auto" ;;
         ollama) echo "qwen3:8b" ;;
+        gemini) echo "gemini-2.5-flash" ;;
         *) echo "claude-sonnet-4-6" ;;
     esac
 }
@@ -379,6 +382,10 @@ load_model_menu_for_backend() {
         ollama)
             MODEL_MENU_LABELS=("qwen3:8b (default)" "Other model ID")
             MODEL_MENU_VALUES=("qwen3:8b" "__custom__")
+            ;;
+        gemini)
+            MODEL_MENU_LABELS=("gemini-2.5-flash (default)" "gemini-2.5-flash-8b" "gemini-2.5-pro" "Other model ID")
+            MODEL_MENU_VALUES=("gemini-2.5-flash" "gemini-2.5-flash-8b" "gemini-2.5-pro" "__custom__")
             ;;
         *)
             MODEL_MENU_LABELS=("Other model ID")
@@ -429,7 +436,7 @@ prompt_for_model() {
 
 validate_backend() {
     case "$1" in
-        anthropic|openai|openrouter|ollama) return 0 ;;
+        anthropic|openai|openrouter|ollama|gemini) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -769,6 +776,65 @@ PY
     return 1
 }
 
+verify_gemini_api_key() {
+    local api_key="$1"
+    local _model="$2"
+    local api_url_override="$3"
+    local api_url="${api_url_override:-${GEMINI_API_URL:-https://generativelanguage.googleapis.com/v1beta/models}}"
+    local response_file
+    local http_code
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Warning: curl not found; skipping Gemini API check."
+        return 2
+    fi
+
+    response_file="$(mktemp -t zclaw-gemini-check.XXXXXX 2>/dev/null || mktemp)"
+    if ! http_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+        -H "x-goog-api-key: $api_key" \
+        "$api_url")"; then
+        rm -f "$response_file"
+        echo "Gemini API check failed: network/transport error."
+        return 1
+    fi
+
+    if [ "$http_code" = "200" ]; then
+        rm -f "$response_file"
+        echo "Gemini API check passed (models endpoint reachable)."
+        return 0
+    fi
+
+    echo "Gemini API check failed (HTTP $http_code)."
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$response_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+try:
+    data = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    print("Response preview: " + p.read_text(encoding="utf-8", errors="ignore")[:200])
+    raise SystemExit(0)
+
+msg = ""
+if isinstance(data, dict):
+    if isinstance(data.get("error"), dict):
+        msg = data["error"].get("message") or data["error"].get("type") or ""
+    elif isinstance(data.get("error"), str):
+        msg = data["error"]
+if msg:
+    print("API said: " + msg)
+PY
+    else
+        echo "Response preview: $(head -c 200 "$response_file")"
+    fi
+
+    rm -f "$response_file"
+    return 1
+}
+
 verify_ollama_endpoint() {
     local api_key="$1"
     local _model="$2"
@@ -1010,13 +1076,13 @@ if [ -z "$BACKEND" ]; then
     if [ "$ASSUME_YES" = true ]; then
         BACKEND="openai"
     else
-        read -r -p "LLM provider [openai/anthropic/openrouter/ollama] (default: openai): " BACKEND
+        read -r -p "LLM provider [openai/anthropic/openrouter/ollama/gemini] (default: openai): " BACKEND
         BACKEND="${BACKEND:-openai}"
     fi
 fi
 
 if ! validate_backend "$BACKEND"; then
-    echo "Error: invalid backend '$BACKEND' (expected anthropic|openai|openrouter|ollama)"
+    echo "Error: invalid backend '$BACKEND' (expected anthropic|openai|openrouter|ollama|gemini)"
     exit 1
 fi
 
@@ -1076,6 +1142,10 @@ if [ "$VERIFY_API_KEY" = true ]; then
         ollama)
             VERIFY_LABEL="Ollama endpoint"
             VERIFY_FN="verify_ollama_endpoint"
+            ;;
+        gemini)
+            VERIFY_LABEL="Gemini"
+            VERIFY_FN="verify_gemini_api_key"
             ;;
     esac
 
